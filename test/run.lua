@@ -1,5 +1,6 @@
 -- Run from the add-on directory: lua test/run.lua
 local now, gamepad, l2, blocking, combat = 0, true, 0, false, false
+local stickX = 0
 local events, updates, messages = {}, {}, {}
 EVENT_ADD_ON_LOADED, EVENT_PLAYER_ACTIVATED, EVENT_PLAYER_DEACTIVATED = 1, 2, 3
 EVENT_GAMEPAD_PREFERRED_MODE_CHANGED, EVENT_CONTROLLER_DISCONNECTED, EVENT_CONTROLLER_CONNECTED = 4, 5, 6
@@ -15,6 +16,12 @@ function IsUnitInCombat(unit) assert(unit == "player"); return combat end
 function GetGameTimeSeconds() return now end
 function IsInGamepadPreferredMode() return gamepad end
 function GetGamepadLeftTriggerMagnitude() return l2 end
+GAMEPAD_INCLUDE_DEADZONE = true
+-- The reading the add-on asks for is the deadzone-corrected one, so a resting stick is 0.
+function GetGamepadLeftStickX(includeDeadzone)
+    assert(includeDeadzone == GAMEPAD_INCLUDE_DEADZONE, 'stick read without the deadzone applied')
+    return stickX
+end
 function IsBlockActive() return blocking end
 function ZO_CreateStringId(id, value) _G[id] = id; messages[id] = value end
 function SafeAddString(id, value) messages[id] = value end
@@ -79,7 +86,8 @@ end
 local function reset()
     a:Stop(); SCENE_MANAGER:RestoreHUDScene(); SCENE_MANAGER.fail = false
     a.sv.enabled = true; a.sv.mode = 'auto'; a.error = nil
-    gamepad = true; combat = false; now = 0; l2 = 0; blocking = false; weaponDowns = 0; weaponUps = 0; a:Start()
+    gamepad = true; combat = false; now = 0; l2 = 0; blocking = false; stickX = 0
+    weaponDowns = 0; weaponUps = 0; a:Start()
 end
 local function chord()
     l2 = 1; assert(leftDown()); assert(leftUp()); tick()
@@ -251,5 +259,31 @@ test('combat blocks sheathe shortcut and restores fallback GUI', function()
  screenshotWithWeapon(); combat = true; assert(not a:OnScreenshotSheathe()); assert(toggleCalls == 0)
  reset(); a.sv.mode = 'gui'; chord(); assert(guiHidden)
  combat = true; events[EVENT_PLAYER_COMBAT_STATE](nil, true); assert(not guiHidden)
+end)
+test('analog stick left is handed back to the game, not read as the D-pad', function()
+    reset(); l2 = 1; stickX = -1
+    assert(not leftDown()); assert(not leftUp()); tick()
+    assert(not a:InScreenshotMode()); assert(not guiHidden)
+    assert(weaponDowns == 1 and weaponUps == 1)
+end)
+test('walking left and then letting go still leaves the chord working', function()
+    reset(); l2 = 1; stickX = -1; assert(not leftDown()); assert(not leftUp())
+    stickX = 0; chord(); assert(a:InScreenshotMode())
+end)
+test('a stick short of the threshold, or pushed the other way, does not block it', function()
+    reset(); l2 = 1; stickX = -0.3; chord(); assert(a:InScreenshotMode())
+    reset(); l2 = 1; stickX = 1; chord(); assert(a:InScreenshotMode())
+end)
+test('an unreadable stick is treated as centred', function()
+    reset(); local original = GetGamepadLeftStickX
+    GetGamepadLeftStickX = nil; l2 = 1; chord(); assert(a:InScreenshotMode())
+    reset(); GetGamepadLeftStickX = function() error('private API') end
+    l2 = 1; chord(); assert(a:InScreenshotMode()); a:PrintStatus()
+    GetGamepadLeftStickX = original
+end)
+test('walking left in screenshot mode does not sheathe', function()
+    screenshotWithWeapon(); stickX = -1
+    assert(not a:OnScreenshotSheathe()); assert(toggleCalls == 0); assert(a:InScreenshotMode())
+    stickX = 0; assert(a:OnScreenshotSheathe()); assert(sheathed and toggleCalls == 1)
 end)
 print(string.format('%d tests passed', count))
