@@ -24,6 +24,7 @@ function GetGamepadLeftStickX(includeDeadzone)
 end
 function IsBlockActive() return blocking end
 function ZO_CreateStringId(id, value) _G[id] = id; messages[id] = value end
+function SafeAddVersion() end
 function SafeAddString(id, value) messages[id] = value end
 function GetString(id) assert(messages[id], 'missing string: '..tostring(id)); return messages[id] end
 function GetCVar() return 'ja' end
@@ -62,11 +63,9 @@ function SCENE_MANAGER:SetHUDScene(name)
 end
 function SCENE_MANAGER:RestoreHUDScene() self.hudName = 'hud'; self.showing = 'hud' end
 SCREENSHOT_MODE_GAMEPAD = {}
-local shots, shotFails = 0, false
-function TakeScreenshot()
-    if shotFails then error('private function') end
-    shots = shots + 1
-end
+-- TakeScreenshot is private on PS5 and pcall does not contain the client's error dialog, so
+-- the add-on must never reach for it. Calling it here is a test failure, not a stub.
+function TakeScreenshot() error('the add-on called TakeScreenshot') end
 -- A stand-in for the library: enough of it to build the panel and press its rows.
 LibHarvensAddonSettings = {
     ST_LABEL = 'label', ST_SECTION = 'section', ST_CHECKBOX = 'checkbox',
@@ -78,7 +77,7 @@ function LibHarvensAddonSettings:AddAddon()
     function panel:UpdateControls() self.updates = self.updates + 1 end
     return panel
 end
-dofile('lang/strings.lua'); dofile('lang/ja.lua'); dofile('Main.lua'); dofile('Settings.lua')
+dofile('lang/strings.lua'); dofile('lang/jp.lua'); dofile('Main.lua'); dofile('Settings.lua')
 local a = PBS_SCREENSHOT_MODE_SHORTCUT
 local count = 0
 local weaponDowns, weaponUps = 0, 0
@@ -104,7 +103,6 @@ local function reset()
     a.sv.enabled = true; a.sv.mode = 'auto'; a.error = nil
     gamepad = true; combat = false; now = 0; l2 = 0; blocking = false; stickX = 0
     a.sv.quickShot = false; a.sv.quickShotHoldMs = a.DEFAULTS.quickShotHoldMs
-    shots = 0; shotFails = false
     weaponDowns = 0; weaponUps = 0; a:Start()
 end
 local function chord()
@@ -114,7 +112,7 @@ events[EVENT_ADD_ON_LOADED](nil, a.name)
 events[EVENT_PLAYER_ACTIVATED]()
 test('manifest initialization and localized commands', function()
     for _, command in ipairs({'help', 'status', 'mode scene', 'mode invalid', 'off', 'on', 'reset', 'unknown',
-        'quick on', 'quick off', 'quick maybe', 'hold 3', 'hold 2', 'hold'}) do a:Command(command) end
+        'quick on', 'quick off', 'quick maybe', 'hold 3', 'hold 10', 'hold 2', 'hold'}) do a:Command(command) end
 end)
 test('first chord works without an L2 binding event or polling tick', function()
     reset(); assert(a.triggerLayerAdded); l2 = 1
@@ -309,46 +307,45 @@ end)
 local function quickChord() a.sv.quickShot = true; chord() end
 local function advance(seconds) now = now + seconds; tick() end
 
-test('quick shot hides the UI, takes the picture and puts the UI back', function()
+test('quick shot clears the UI for the hold and brings it back by itself', function()
     reset(); quickChord()
-    assert(guiHidden); assert(not a:InScreenshotMode()); assert(shots == 0, 'shot before the UI was down')
-    advance(0.2); assert(shots == 1); assert(guiHidden, 'UI came back in the same frame as the shot')
-    advance(1); assert(not guiHidden); assert(not a:QuickShotRunning())
+    assert(guiHidden); assert(not a:InScreenshotMode()); assert(a:QuickShotRunning())
+    advance(1); assert(guiHidden, 'came back before the 5 second default hold')
+    advance(4.1); assert(not guiHidden); assert(not a:QuickShotRunning())
 end)
-test('the saved event brings the UI back before the hold runs out', function()
-    reset(); a.sv.quickShotHoldMs = 5000; quickChord(); advance(0.2); assert(shots == 1)
+test('the add-on never asks the client to take a picture', function()
+    local file = assert(io.open('Main.lua')); local source = file:read('*a'); file:close()
+    assert(not source:find('TakeScreenshot(', 1, true), 'TakeScreenshot is private on PS5')
+    reset(); quickChord(); advance(1); advance(4.1)
+end)
+test('a reported capture brings the UI back before the hold runs out', function()
+    reset(); a.sv.quickShotHoldMs = 10000; quickChord(); advance(1)
     events[EVENT_SCREENSHOT_SAVED](nil, 'dir', 'shot.jpg'); advance(0.05)
     assert(not guiHidden); assert(tostring(a.lastShot):find('shot.jpg', 1, true))
 end)
 test('a second chord during a quick shot gives the UI straight back', function()
     reset(); quickChord(); assert(guiHidden)
-    chord(); assert(not guiHidden); assert(not a:QuickShotRunning()); assert(shots == 0)
+    chord(); assert(not guiHidden); assert(not a:QuickShotRunning())
 end)
 test('quick shot ignores the mode setting and never opens the scene', function()
     reset(); a.sv.mode = 'scene'; quickChord()
     assert(guiHidden); assert(not a:InScreenshotMode())
-    advance(0.2); advance(1); assert(not a:InScreenshotMode())
+    advance(1); advance(4.1); assert(not a:InScreenshotMode())
 end)
 test('a loading screen during a quick shot restores the UI', function()
     reset(); quickChord(); SCENE_MANAGER.showing = 'menu'; advance(0.2)
-    assert(not guiHidden); assert(not a:QuickShotRunning()); assert(shots == 0)
+    assert(not guiHidden); assert(not a:QuickShotRunning())
     reset(); quickChord(); events[EVENT_PLAYER_DEACTIVATED]()
     assert(not guiHidden); assert(not a:QuickShotRunning())
 end)
-test('a refused or missing TakeScreenshot still restores the UI', function()
-    reset(); shotFails = true; quickChord(); advance(0.2); advance(1)
-    assert(not guiHidden); assert(tostring(a.lastShot):find('refused', 1, true))
-    reset(); local original = TakeScreenshot; TakeScreenshot = nil
-    quickChord(); advance(0.2); advance(1)
-    assert(not guiHidden); assert(a.lastShot == 'TakeScreenshot unavailable')
-    TakeScreenshot = original
-end)
 test('the hold length is what decides when the UI comes back', function()
-    reset(); a.sv.quickShotHoldMs = 3000; quickChord(); advance(0.2); advance(1)
-    assert(guiHidden, 'came back before the configured hold'); advance(2.1); assert(not guiHidden)
+    reset(); a.sv.quickShotHoldMs = 1000; quickChord(); advance(0.5)
+    assert(guiHidden); advance(0.6); assert(not guiHidden)
+    reset(); a.sv.quickShotHoldMs = 10000; quickChord(); advance(5.1)
+    assert(guiHidden, 'came back before the configured hold'); advance(5.1); assert(not guiHidden)
 end)
 test('quick shot off leaves the old behaviour alone', function()
-    reset(); chord(); assert(a:InScreenshotMode()); assert(shots == 0)
+    reset(); chord(); assert(a:InScreenshotMode()); assert(not a:QuickShotRunning())
 end)
 
 -- ---- settings panel -------------------------------------------------------------------
@@ -401,5 +398,30 @@ test('the run button and the reset button are wired to the add-on', function()
     a.sv.quickShot = true; a.sv.mode = 'gui'
     row(SI_PBSSMS_RESET_ROW).clickHandler()
     assert(a:QuickShot() == a.DEFAULTS.quickShot); assert(a:Mode() == a.DEFAULTS.mode)
+end)
+-- ---- the language files ----------------------------------------------------------------
+local function ReadIds(path)
+    local file = assert(io.open(path)); local source = file:read('*a'); file:close()
+    local ids = {}
+    for id in source:gmatch('(SI_PBSSMS_[%u%d_]+)%s*=%s*"') do ids[id] = true end
+    return ids, source
+end
+test('the Japanese file translates every string and invents none', function()
+    local english = ReadIds('lang/strings.lua')
+    local japanese, japaneseSource = ReadIds('lang/jp.lua')
+    for id in pairs(english) do assert(japanese[id], 'no Japanese for ' .. id) end
+    for id in pairs(japanese) do assert(english[id], 'Japanese string nothing declares: ' .. id) end
+    -- The client's Japanese is "jp", not "ja", and 1.1.0 lost the whole translation to that.
+    -- The manifest loads lang/$(language).lua, so the file must not gate on a language itself.
+    assert(not japaneseSource:find('GetCVar', 1, true), 'the language file gates on the language')
+    local manifest = assert(io.open('PBsScreenshotModeShortcut.addon'))
+    local lines = manifest:read('*a'); manifest:close()
+    assert(lines:find('lang/$(language).lua', 1, true)); assert(not lines:find('lang/ja.lua', 1, true))
+end)
+test('the panel and the chat lines are the translated ones', function()
+    -- GetString is answering out of the Japanese table here, which is what the harness loaded
+    -- last: a panel row built from an untranslated id would show up as the English text.
+    assert(GetString(SI_PBSSMS_QUICK) == 'クイックショットモードを使う')
+    assert(string.format(GetString(SI_PBSSMS_HOLD_ITEM), 5) == '5秒')
 end)
 print(string.format('%d tests passed', count))

@@ -4,15 +4,17 @@
 -- state; activation does not wait for a Left Up event.
 --
 -- Quick shot mode (optional, off by default) changes what the chord does rather than how it
--- is heard: instead of moving to the screenshot scene it takes the interface away, calls
--- TakeScreenshot, and puts the interface back. The picture is the one thing the game's own
--- screenshot mode never does for you, and the whole round trip is under a second.
+-- is heard: instead of moving to the screenshot scene it takes the interface away for a few
+-- seconds and puts it back by itself. The picture is taken with the console's own capture
+-- button, in the window where there is nothing on the screen but the world.
 --
--- TakeScreenshot is public in the API dump, but that dump is a hint and not an authority, and
--- no PlayStation has been asked yet. So the call is made under pcall, the result is kept for
--- /pbshot status, and the interface stays down for the configured hold either way -- which is
--- long enough to press the console's own capture button if the client's call turns out to do
--- nothing there. EVENT_SCREENSHOT_SAVED, when it arrives, brings the interface straight back.
+-- 1.1.0 called TakeScreenshot in that window. It is unmarked in the API dump and it is
+-- PRIVATE on PS5, measured: "Attempt to access a private function 'TakeScreenshot' from
+-- insecure code". Worse, wrapping it in pcall did not contain it -- the client still put its
+-- own UI error dialog over the game, which is the opposite of a clean screenshot. The call is
+-- gone, and nothing here asks the client to take a picture. EVENT_SCREENSHOT_SAVED is still
+-- listened to, because if a capture ever does get reported the interface may as well come
+-- back early.
 --
 -- Left is the D-pad only. The bind inherited from UI_SHORTCUT_INPUT_LEFT also arrives when
 -- the left analog stick is pushed left, because the stick emulates the same directional
@@ -53,19 +55,18 @@ local DEFERRED_FIRE = addon.name .. "DeferredFire"
 local MODES = { "auto", "scene", "gui" }
 
 local QUICK_SHOT_UPDATE = addon.name .. "QuickShot"
--- Hiding the interface takes effect in the frames that follow the call, so the shot waits.
--- Short enough not to be felt, long enough to cover several frames on a loaded scene.
-local QUICK_SHOT_SETTLE_MS = 150
 local QUICK_SHOT_TICK_MS = 50
--- How long the interface stays down when nothing says the picture has been saved.
-local QUICK_SHOT_HOLDS_MS = { 500, 1000, 3000, 5000 }
+-- How long the interface stays down. This is a window for a human thumb on the console's
+-- capture button, not a frame-timing allowance, which is why the short end starts at a second
+-- and the long end is long enough to frame a shot.
+local QUICK_SHOT_HOLDS_MS = { 1000, 3000, 5000, 10000 }
 
 local DEFAULTS = {
 	enabled = true,
 	mode = "auto",
 	announce = true,
 	quickShot = false,
-	quickShotHoldMs = 1000,
+	quickShotHoldMs = 5000,
 }
 
 -- ---------------------------------------------------------------------------------------
@@ -527,10 +528,10 @@ function addon:StartQuickShot()
 		self:Line(SI_PBSSMS_BOTH_FAILED, tostring(err))
 		return false, err
 	end
-	self.quickShotState = "settling"
+	self.quickShotState = "holding"
 	self.quickShotStartedAtS = GetGameTimeSeconds()
 	self.quickShotSaved = nil
-	self.lastShot = "pending"
+	self.lastShot = "interface down"
 	em:RegisterForUpdate(QUICK_SHOT_UPDATE, QUICK_SHOT_TICK_MS, function() self:OnQuickShotTick() end)
 	self.quickShots = (self.quickShots or 0) + 1
 	return true, "quick shot"
@@ -559,27 +560,11 @@ function addon:OnQuickShotTick()
 		return
 	end
 
+	-- Nothing to do but wait out the window the player asked for. A capture reported by the
+	-- client ends it early; on a console the capture button is the platform's business and
+	-- says nothing, so the hold is what the interface comes back on.
 	local elapsedMs = (GetGameTimeSeconds() - self.quickShotStartedAtS) * 1000
-	if self.quickShotState == "settling" then
-		if elapsedMs < QUICK_SHOT_SETTLE_MS then
-			return
-		end
-		self.quickShotState = "holding"
-		if not TakeScreenshot then
-			self.lastShot = "TakeScreenshot unavailable"
-		else
-			local ok, err = pcall(TakeScreenshot)
-			self.lastShot = ok and "requested" or ("refused: " .. tostring(err))
-			if not ok then
-				self.lastError = tostring(err)
-			end
-		end
-		return
-	end
-
-	-- Holding. The saved event is the only positive proof the picture exists; without it the
-	-- hold is what keeps the interface down long enough for the console's own capture button.
-	if self.quickShotSaved or elapsedMs >= QUICK_SHOT_SETTLE_MS + self:QuickShotHoldMs() then
+	if self.quickShotSaved or elapsedMs >= self:QuickShotHoldMs() then
 		self:EndQuickShot()
 	end
 end
@@ -932,6 +917,5 @@ addon.TRIGGER_LAYER = TRIGGER_LAYER
 addon.SCREENSHOT_SCENE = SCREENSHOT_SCENE
 addon.MAX_HOLD_S = MAX_HOLD_S
 addon.QUICK_SHOT_HOLDS_MS = QUICK_SHOT_HOLDS_MS
-addon.QUICK_SHOT_SETTLE_MS = QUICK_SHOT_SETTLE_MS
 
 PBS_SCREENSHOT_MODE_SHORTCUT = addon
