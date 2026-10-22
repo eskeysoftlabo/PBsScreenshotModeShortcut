@@ -3,6 +3,17 @@
 -- L2 remains owned by the game. Read its analog value or the standard block
 -- state; activation does not wait for a Left Up event.
 --
+-- Quick shot mode (optional, off by default) changes what the chord does rather than how it
+-- is heard: instead of moving to the screenshot scene it takes the interface away, calls
+-- TakeScreenshot, and puts the interface back. The picture is the one thing the game's own
+-- screenshot mode never does for you, and the whole round trip is under a second.
+--
+-- TakeScreenshot is public in the API dump, but that dump is a hint and not an authority, and
+-- no PlayStation has been asked yet. So the call is made under pcall, the result is kept for
+-- /pbshot status, and the interface stays down for the configured hold either way -- which is
+-- long enough to press the console's own capture button if the client's call turns out to do
+-- nothing there. EVENT_SCREENSHOT_SAVED, when it arrives, brings the interface straight back.
+--
 -- Left is the D-pad only. The bind inherited from UI_SHORTCUT_INPUT_LEFT also arrives when
 -- the left analog stick is pushed left, because the stick emulates the same directional
 -- input, and there is no key code in the handler to tell the two apart. What can be read is
@@ -41,10 +52,20 @@ local DEFERRED_FIRE = addon.name .. "DeferredFire"
 
 local MODES = { "auto", "scene", "gui" }
 
+local QUICK_SHOT_UPDATE = addon.name .. "QuickShot"
+-- Hiding the interface takes effect in the frames that follow the call, so the shot waits.
+-- Short enough not to be felt, long enough to cover several frames on a loaded scene.
+local QUICK_SHOT_SETTLE_MS = 150
+local QUICK_SHOT_TICK_MS = 50
+-- How long the interface stays down when nothing says the picture has been saved.
+local QUICK_SHOT_HOLDS_MS = { 500, 1000, 3000, 5000 }
+
 local DEFAULTS = {
 	enabled = true,
 	mode = "auto",
 	announce = true,
+	quickShot = false,
+	quickShotHoldMs = 1000,
 }
 
 -- ---------------------------------------------------------------------------------------
@@ -118,6 +139,60 @@ function addon:Mode()
 		end
 	end
 	return DEFAULTS.mode
+end
+
+function addon:QuickShot()
+	return self.sv ~= nil and self.sv.quickShot == true
+end
+
+function addon:SetQuickShot(value)
+	if self.sv then
+		self.sv.quickShot = value and true or false
+	end
+	self:RefreshPanel()
+end
+
+function addon:QuickShotHoldMs()
+	local held = self.sv and self.sv.quickShotHoldMs
+	for _, known in ipairs(QUICK_SHOT_HOLDS_MS) do
+		if held == known then
+			return held
+		end
+	end
+	return DEFAULTS.quickShotHoldMs
+end
+
+function addon:SetQuickShotHoldMs(value)
+	for _, known in ipairs(QUICK_SHOT_HOLDS_MS) do
+		if value == known and self.sv then
+			self.sv.quickShotHoldMs = known
+		end
+	end
+	self:RefreshPanel()
+end
+
+function addon:SetEnabled(value)
+	if self.sv then
+		self.sv.enabled = value and true or false
+	end
+	self:Restart()
+	self:RefreshPanel()
+end
+
+function addon:SetMode(value)
+	for _, known in ipairs(MODES) do
+		if value == known and self.sv then
+			self.sv.mode = known
+			self.announcedFallback = false
+		end
+	end
+	self:RefreshPanel()
+end
+
+function addon:RefreshPanel()
+	if self.settingsControls and self.settingsControls.UpdateControls then
+		pcall(function() self.settingsControls:UpdateControls() end)
+	end
 end
 
 -- ---------------------------------------------------------------------------------------
@@ -430,11 +505,103 @@ function addon:RestoreGui()
 	end
 end
 
+-- ---------------------------------------------------------------------------------------
+-- Quick shot
+--
+-- Hide, settle, shoot, hold, restore. Driven by one update rather than by nested timers, so
+-- there is a single place that decides what state this is in and a single place that can be
+-- told to stop -- which is what Stop() and a loading screen both do.
+-- ---------------------------------------------------------------------------------------
+
+function addon:QuickShotRunning()
+	return self.quickShotState ~= nil
+end
+
+function addon:StartQuickShot()
+	if self:QuickShotRunning() then
+		return true, "quick shot already running"
+	end
+	local ok, err = self:HideGui()
+	if not ok then
+		self.lastError = err
+		self:Line(SI_PBSSMS_BOTH_FAILED, tostring(err))
+		return false, err
+	end
+	self.quickShotState = "settling"
+	self.quickShotStartedAtS = GetGameTimeSeconds()
+	self.quickShotSaved = nil
+	self.lastShot = "pending"
+	em:RegisterForUpdate(QUICK_SHOT_UPDATE, QUICK_SHOT_TICK_MS, function() self:OnQuickShotTick() end)
+	self.quickShots = (self.quickShots or 0) + 1
+	return true, "quick shot"
+end
+
+-- Ends the sequence from wherever it got to. Safe to call when nothing is running.
+function addon:EndQuickShot()
+	if not self:QuickShotRunning() then
+		return
+	end
+	self.quickShotState = nil
+	self.quickShotStartedAtS = nil
+	em:UnregisterForUpdate(QUICK_SHOT_UPDATE)
+	self:RestoreGui()
+end
+
+function addon:OnQuickShotTick()
+	if not self:QuickShotRunning() then
+		em:UnregisterForUpdate(QUICK_SHOT_UPDATE)
+		return
+	end
+	-- A loading screen or a menu while the interface is down ends it at once, picture or no
+	-- picture: the watchdog's rule, applied here because this sequence owns the hiding.
+	if not self:OnHud() then
+		self:EndQuickShot()
+		return
+	end
+
+	local elapsedMs = (GetGameTimeSeconds() - self.quickShotStartedAtS) * 1000
+	if self.quickShotState == "settling" then
+		if elapsedMs < QUICK_SHOT_SETTLE_MS then
+			return
+		end
+		self.quickShotState = "holding"
+		if not TakeScreenshot then
+			self.lastShot = "TakeScreenshot unavailable"
+		else
+			local ok, err = pcall(TakeScreenshot)
+			self.lastShot = ok and "requested" or ("refused: " .. tostring(err))
+			if not ok then
+				self.lastError = tostring(err)
+			end
+		end
+		return
+	end
+
+	-- Holding. The saved event is the only positive proof the picture exists; without it the
+	-- hold is what keeps the interface down long enough for the console's own capture button.
+	if self.quickShotSaved or elapsedMs >= QUICK_SHOT_SETTLE_MS + self:QuickShotHoldMs() then
+		self:EndQuickShot()
+	end
+end
+
+function addon:OnScreenshotSaved(directory, filename)
+	self.lastShot = "saved: " .. tostring(filename or directory or "?")
+	if self:QuickShotRunning() then
+		self.quickShotSaved = true
+	end
+end
+
 -- What the chord does. Also what /pbshot now does, so the whole path can be exercised without
 -- a controller in the way.
 function addon:Fire(preservePress)
 	if not preservePress then self:CancelPress() end
 
+	-- A second chord during a quick shot is somebody saying "that is enough": the interface
+	-- comes straight back rather than waiting out the hold.
+	if self:QuickShotRunning() then
+		self:EndQuickShot()
+		return true, "quick shot cancelled"
+	end
 	if self.guiHidden then
 		self:RestoreGui()
 		return true, "gui-off"
@@ -447,6 +614,10 @@ function addon:Fire(preservePress)
 		return false, "not on an enabled gamepad HUD"
 	end
 	self.lastError = nil
+	-- Quick shot replaces the whole mode question: no scene, no lasting hiding, a picture.
+	if self:QuickShot() then
+		return self:StartQuickShot()
+	end
 	local mode = self:Mode()
 	if mode ~= "gui" then
 		local ok, err = self:EnterClientScreenshotMode()
@@ -496,6 +667,7 @@ end
 
 function addon:Stop()
 	self:CancelPress()
+	self:EndQuickShot()
 	self:SetInputLayer(false)
 	self:RestoreGui()
 	self:StopWatchdog()
@@ -580,6 +752,9 @@ function addon:PrintStatus()
 		tostring(self.lastStickX), self.stickRejections or 0))
 	self:Raw(string.format("attempts=%d input=%s",
 		self.fireAttempts or 0, tostring(self.lastInput or "none")))
+	self:Raw(string.format("quick shot=%s hold=%dms state=%s shots=%d last shot=%s",
+		tostring(self:QuickShot()), self:QuickShotHoldMs(), tostring(self.quickShotState or "idle"),
+		self.quickShots or 0, tostring(self.lastShot or "none")))
 	self:Raw(string.format("state: hudScene=%s guiHidden=%s error=%s last=%s",
 		tostring(SCENE_MANAGER and SCENE_MANAGER:GetHUDSceneName()), tostring(self.guiHidden == true),
 		tostring(self.error or "none"), tostring(self.lastError or "none")))
@@ -608,9 +783,33 @@ function addon:Command(argumentString)
 	end
 
 	if command == "on" or command == "off" then
-		self.sv.enabled = command == "on"
-		self:Restart()
-		self:Line(self.sv.enabled and SI_PBSSMS_TURNED_ON or SI_PBSSMS_TURNED_OFF)
+		self:SetEnabled(command == "on")
+		self:Line(self:Enabled() and SI_PBSSMS_TURNED_ON or SI_PBSSMS_TURNED_OFF)
+		return
+	end
+
+	if command == "quick" then
+		local value = OnOrOff(argument)
+		if value == nil then
+			self:Line(SI_PBSSMS_ERROR_ON_OR_OFF)
+			return
+		end
+		self:SetQuickShot(value)
+		self:Line(value and SI_PBSSMS_QUICK_ON or SI_PBSSMS_QUICK_OFF)
+		return
+	end
+
+	if command == "hold" then
+		local seconds = tonumber(argument)
+		local wanted = seconds and math.floor(seconds * 1000 + 0.5)
+		for _, known in ipairs(QUICK_SHOT_HOLDS_MS) do
+			if wanted == known then
+				self:SetQuickShotHoldMs(known)
+				self:Line(SI_PBSSMS_HOLD_SET, known / 1000)
+				return
+			end
+		end
+		self:Line(SI_PBSSMS_ERROR_HOLD)
 		return
 	end
 
@@ -644,6 +843,7 @@ function addon:Command(argumentString)
 		end
 		self.announcedFallback = false
 		self:Restart()
+		self:RefreshPanel()
 		self:Line(SI_PBSSMS_RESET)
 		return
 	end
@@ -653,6 +853,8 @@ function addon:Command(argumentString)
 		self:Raw(Text(SI_PBSSMS_HELP_STATUS))
 		self:Raw(Text(SI_PBSSMS_HELP_NOW))
 		self:Raw(Text(SI_PBSSMS_HELP_MODE))
+		self:Raw(Text(SI_PBSSMS_HELP_QUICK))
+		self:Raw(Text(SI_PBSSMS_HELP_HOLD))
 		self:Raw(Text(SI_PBSSMS_HELP_BINDS))
 		self:Raw(Text(SI_PBSSMS_HELP_MASTER))
 		self:Raw(Text(SI_PBSSMS_HELP_RESET))
@@ -676,7 +878,14 @@ end
 
 local function OnPlayerActivated()
 	-- Not at EVENT_ADD_ON_LOADED: the scenes and the keybind machinery are not up yet, and a
-	-- line put in chat there is thrown away.
+	-- line put in chat there is thrown away. The settings panel is built here for the same
+	-- reason -- the library is not necessarily up at load -- and only once.
+	if not addon.panelBuilt then
+		addon.panelBuilt = true
+		if addon.InitSettings then
+			addon:InitSettings()
+		end
+	end
 	addon:Start()
 end
 
@@ -699,6 +908,11 @@ local function OnAddOnLoaded(_, name)
 	end)
 	em:RegisterForEvent(addon.name, EVENT_PLAYER_ACTIVATED, OnPlayerActivated)
 	em:RegisterForEvent(addon.name, EVENT_PLAYER_DEACTIVATED, OnPlayerDeactivated)
+	if EVENT_SCREENSHOT_SAVED then
+		em:RegisterForEvent(addon.name, EVENT_SCREENSHOT_SAVED, function(_, directory, filename)
+			addon:OnScreenshotSaved(directory, filename)
+		end)
+	end
 	if EVENT_GAMEPAD_PREFERRED_MODE_CHANGED then
 		em:RegisterForEvent(addon.name, EVENT_GAMEPAD_PREFERRED_MODE_CHANGED, function() addon:Restart() end)
 	end
@@ -717,5 +931,7 @@ addon.DEFAULTS = DEFAULTS
 addon.TRIGGER_LAYER = TRIGGER_LAYER
 addon.SCREENSHOT_SCENE = SCREENSHOT_SCENE
 addon.MAX_HOLD_S = MAX_HOLD_S
+addon.QUICK_SHOT_HOLDS_MS = QUICK_SHOT_HOLDS_MS
+addon.QUICK_SHOT_SETTLE_MS = QUICK_SHOT_SETTLE_MS
 
 PBS_SCREENSHOT_MODE_SHORTCUT = addon

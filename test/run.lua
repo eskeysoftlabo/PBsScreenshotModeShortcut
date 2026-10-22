@@ -4,7 +4,7 @@ local stickX = 0
 local events, updates, messages = {}, {}, {}
 EVENT_ADD_ON_LOADED, EVENT_PLAYER_ACTIVATED, EVENT_PLAYER_DEACTIVATED = 1, 2, 3
 EVENT_GAMEPAD_PREFERRED_MODE_CHANGED, EVENT_CONTROLLER_DISCONNECTED, EVENT_CONTROLLER_CONNECTED = 4, 5, 6
-EVENT_PLAYER_COMBAT_STATE = 7
+EVENT_PLAYER_COMBAT_STATE, EVENT_SCREENSHOT_SAVED = 7, 8
 SCENE_FRAGMENT_HIDDEN = 'hidden'
 EVENT_MANAGER = {
     RegisterForEvent = function(_, _, event, callback) events[event] = callback end,
@@ -62,7 +62,23 @@ function SCENE_MANAGER:SetHUDScene(name)
 end
 function SCENE_MANAGER:RestoreHUDScene() self.hudName = 'hud'; self.showing = 'hud' end
 SCREENSHOT_MODE_GAMEPAD = {}
-dofile('lang/strings.lua'); dofile('lang/ja.lua'); dofile('Main.lua')
+local shots, shotFails = 0, false
+function TakeScreenshot()
+    if shotFails then error('private function') end
+    shots = shots + 1
+end
+-- A stand-in for the library: enough of it to build the panel and press its rows.
+LibHarvensAddonSettings = {
+    ST_LABEL = 'label', ST_SECTION = 'section', ST_CHECKBOX = 'checkbox',
+    ST_DROPDOWN = 'dropdown', ST_BUTTON = 'button',
+}
+function LibHarvensAddonSettings:AddAddon()
+    local panel = {rows = {}, updates = 0}
+    function panel:AddSetting(row) self.rows[#self.rows + 1] = row end
+    function panel:UpdateControls() self.updates = self.updates + 1 end
+    return panel
+end
+dofile('lang/strings.lua'); dofile('lang/ja.lua'); dofile('Main.lua'); dofile('Settings.lua')
 local a = PBS_SCREENSHOT_MODE_SHORTCUT
 local count = 0
 local weaponDowns, weaponUps = 0, 0
@@ -87,6 +103,8 @@ local function reset()
     a:Stop(); SCENE_MANAGER:RestoreHUDScene(); SCENE_MANAGER.fail = false
     a.sv.enabled = true; a.sv.mode = 'auto'; a.error = nil
     gamepad = true; combat = false; now = 0; l2 = 0; blocking = false; stickX = 0
+    a.sv.quickShot = false; a.sv.quickShotHoldMs = a.DEFAULTS.quickShotHoldMs
+    shots = 0; shotFails = false
     weaponDowns = 0; weaponUps = 0; a:Start()
 end
 local function chord()
@@ -95,7 +113,8 @@ end
 events[EVENT_ADD_ON_LOADED](nil, a.name)
 events[EVENT_PLAYER_ACTIVATED]()
 test('manifest initialization and localized commands', function()
-    for _, command in ipairs({'help', 'status', 'mode scene', 'mode invalid', 'off', 'on', 'reset', 'unknown'}) do a:Command(command) end
+    for _, command in ipairs({'help', 'status', 'mode scene', 'mode invalid', 'off', 'on', 'reset', 'unknown',
+        'quick on', 'quick off', 'quick maybe', 'hold 3', 'hold 2', 'hold'}) do a:Command(command) end
 end)
 test('first chord works without an L2 binding event or polling tick', function()
     reset(); assert(a.triggerLayerAdded); l2 = 1
@@ -285,5 +304,102 @@ test('walking left in screenshot mode does not sheathe', function()
     screenshotWithWeapon(); stickX = -1
     assert(not a:OnScreenshotSheathe()); assert(toggleCalls == 0); assert(a:InScreenshotMode())
     stickX = 0; assert(a:OnScreenshotSheathe()); assert(sheathed and toggleCalls == 1)
+end)
+-- ---- quick shot ----------------------------------------------------------------------
+local function quickChord() a.sv.quickShot = true; chord() end
+local function advance(seconds) now = now + seconds; tick() end
+
+test('quick shot hides the UI, takes the picture and puts the UI back', function()
+    reset(); quickChord()
+    assert(guiHidden); assert(not a:InScreenshotMode()); assert(shots == 0, 'shot before the UI was down')
+    advance(0.2); assert(shots == 1); assert(guiHidden, 'UI came back in the same frame as the shot')
+    advance(1); assert(not guiHidden); assert(not a:QuickShotRunning())
+end)
+test('the saved event brings the UI back before the hold runs out', function()
+    reset(); a.sv.quickShotHoldMs = 5000; quickChord(); advance(0.2); assert(shots == 1)
+    events[EVENT_SCREENSHOT_SAVED](nil, 'dir', 'shot.jpg'); advance(0.05)
+    assert(not guiHidden); assert(tostring(a.lastShot):find('shot.jpg', 1, true))
+end)
+test('a second chord during a quick shot gives the UI straight back', function()
+    reset(); quickChord(); assert(guiHidden)
+    chord(); assert(not guiHidden); assert(not a:QuickShotRunning()); assert(shots == 0)
+end)
+test('quick shot ignores the mode setting and never opens the scene', function()
+    reset(); a.sv.mode = 'scene'; quickChord()
+    assert(guiHidden); assert(not a:InScreenshotMode())
+    advance(0.2); advance(1); assert(not a:InScreenshotMode())
+end)
+test('a loading screen during a quick shot restores the UI', function()
+    reset(); quickChord(); SCENE_MANAGER.showing = 'menu'; advance(0.2)
+    assert(not guiHidden); assert(not a:QuickShotRunning()); assert(shots == 0)
+    reset(); quickChord(); events[EVENT_PLAYER_DEACTIVATED]()
+    assert(not guiHidden); assert(not a:QuickShotRunning())
+end)
+test('a refused or missing TakeScreenshot still restores the UI', function()
+    reset(); shotFails = true; quickChord(); advance(0.2); advance(1)
+    assert(not guiHidden); assert(tostring(a.lastShot):find('refused', 1, true))
+    reset(); local original = TakeScreenshot; TakeScreenshot = nil
+    quickChord(); advance(0.2); advance(1)
+    assert(not guiHidden); assert(a.lastShot == 'TakeScreenshot unavailable')
+    TakeScreenshot = original
+end)
+test('the hold length is what decides when the UI comes back', function()
+    reset(); a.sv.quickShotHoldMs = 3000; quickChord(); advance(0.2); advance(1)
+    assert(guiHidden, 'came back before the configured hold'); advance(2.1); assert(not guiHidden)
+end)
+test('quick shot off leaves the old behaviour alone', function()
+    reset(); chord(); assert(a:InScreenshotMode()); assert(shots == 0)
+end)
+
+-- ---- settings panel -------------------------------------------------------------------
+a:InitSettings()
+local panel = assert(a.settingsControls, 'panel was not built')
+local function row(labelId)
+    for _, entry in ipairs(panel.rows) do
+        if entry.label == GetString(labelId) then return entry end
+    end
+    error('no row for ' .. tostring(labelId))
+end
+test('the panel carries every switch the slash commands have', function()
+    assert(#panel.rows == 9)
+    assert(row(SI_PBSSMS_ENABLED).type == LibHarvensAddonSettings.ST_CHECKBOX)
+    assert(row(SI_PBSSMS_QUICK).type == LibHarvensAddonSettings.ST_CHECKBOX)
+    assert(row(SI_PBSSMS_MODE).type == LibHarvensAddonSettings.ST_DROPDOWN)
+    assert(row(SI_PBSSMS_HOLD).type == LibHarvensAddonSettings.ST_DROPDOWN)
+end)
+test('the quick shot checkbox is the same switch as /pbshot quick', function()
+    reset(); local checkbox = row(SI_PBSSMS_QUICK)
+    assert(checkbox.getFunction() == false)
+    checkbox.setFunction(true); assert(a:QuickShot()); assert(checkbox.getFunction() == true)
+    chord(); assert(guiHidden); assert(not a:InScreenshotMode()); a:Stop()
+    a:Command('quick off'); assert(checkbox.getFunction() == false)
+end)
+test('the hold dropdown stores milliseconds and refuses anything else', function()
+    reset(); local dropdown = row(SI_PBSSMS_HOLD)
+    dropdown.setFunction(nil, nil, {data = 3000}); assert(a:QuickShotHoldMs() == 3000)
+    dropdown.setFunction(nil, nil, {data = 1234}); assert(a:QuickShotHoldMs() == 3000)
+    assert(dropdown.getFunction() == string.format(GetString(SI_PBSSMS_HOLD_ITEM), 3))
+end)
+test('the mode row goes grey while quick shot owns the chord', function()
+    reset(); local mode = row(SI_PBSSMS_MODE)
+    assert(not mode.disable()); a:SetQuickShot(true); assert(mode.disable())
+    assert(row(SI_PBSSMS_HOLD).disable() == false)
+    a:SetQuickShot(false); assert(row(SI_PBSSMS_HOLD).disable() == true)
+end)
+test('panel rows and slash commands both refresh the panel', function()
+    reset(); local before = panel.updates
+    a:Command('quick on'); a:Command('mode gui'); a:Command('hold 5')
+    assert(panel.updates > before)
+end)
+test('the enable checkbox puts the input layer back when it is turned on', function()
+    reset(); local checkbox = row(SI_PBSSMS_ENABLED)
+    checkbox.setFunction(false); assert(not a.triggerLayerAdded); assert(checkbox.getFunction() == false)
+    checkbox.setFunction(true); assert(a.triggerLayerAdded)
+end)
+test('the run button and the reset button are wired to the add-on', function()
+    reset(); row(SI_PBSSMS_RUN_NOW).clickHandler(); assert(a:InScreenshotMode())
+    a.sv.quickShot = true; a.sv.mode = 'gui'
+    row(SI_PBSSMS_RESET_ROW).clickHandler()
+    assert(a:QuickShot() == a.DEFAULTS.quickShot); assert(a:Mode() == a.DEFAULTS.mode)
 end)
 print(string.format('%d tests passed', count))
