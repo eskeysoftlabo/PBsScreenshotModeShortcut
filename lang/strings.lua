@@ -17,6 +17,7 @@ local strings = {
     SI_PBSSMS_HELP_RESET = "/pbshot reset — restore defaults",
     SI_PBSSMS_HELP_QUICK = "/pbshot quick on|off — quick shot mode",
     SI_PBSSMS_HELP_HOLD = "/pbshot hold 1|3|5|10 — seconds the interface stays down",
+    SI_PBSSMS_HELP_GUIS = "/pbshot guis — which GUIs the client knows; /pbshot gui <name> tries one",
 
     SI_PBSSMS_QUICK_ON = "Quick shot mode on. The chord takes the interface away for a few seconds and puts it back by itself -- take the picture with the console's capture button.",
     SI_PBSSMS_QUICK_OFF = "Quick shot mode off. The chord opens screenshot mode again.",

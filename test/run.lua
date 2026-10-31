@@ -31,10 +31,25 @@ function GetCVar() return 'ja' end
 function d() end
 SLASH_COMMANDS = {}
 ZO_SavedVars = { NewAccountWide = function(_, _, _, _, defaults)
-    local copy = {}; for k,v in pairs(defaults) do copy[k] = v end; return copy
+    -- Like the real one: a table default is copied, never shared with the add-on's own.
+    local copy = {}
+    for k, v in pairs(defaults) do
+        if type(v) == 'table' then local t = {}; for i, e in ipairs(v) do t[i] = e end; copy[k] = t
+        else copy[k] = v end
+    end
+    return copy
 end }
 local guiHidden = false
-function SetGuiHidden(_, hidden) guiHidden = hidden end
+local guis, unknownGuis = {}, {}
+function SetGuiHidden(name, hidden)
+    if unknownGuis[name] then error('no such gui: ' .. tostring(name)) end
+    guis[name] = hidden
+    if name == 'ingame' then guiHidden = hidden end
+end
+function GetGuiHidden(name)
+    if unknownGuis[name] then error('no such gui: ' .. tostring(name)) end
+    return guis[name] == true
+end
 ZO_ActionLayerFragment = {New = function(_, name)
     return {name = name, RegisterCallback = function(self, _, cb) self.callback = cb end}
 end}
@@ -103,6 +118,7 @@ local function reset()
     a.sv.enabled = true; a.sv.mode = 'auto'; a.error = nil
     gamepad = true; combat = false; now = 0; l2 = 0; blocking = false; stickX = 0
     a.sv.quickShot = false; a.sv.quickShotHoldMs = a.DEFAULTS.quickShotHoldMs
+    a.sv.extraGuis = {}; guis = {}; unknownGuis = {}
     weaponDowns = 0; weaponUps = 0; a:Start()
 end
 local function chord()
@@ -423,5 +439,43 @@ test('the panel and the chat lines are the translated ones', function()
     -- last: a panel row built from an untranslated id would show up as the English text.
     assert(GetString(SI_PBSSMS_QUICK) == 'クイックショットモードを使う')
     assert(string.format(GetString(SI_PBSSMS_HOLD_ITEM), 5) == '5秒')
+end)
+-- ---- which GUIs go down --------------------------------------------------------------
+test('quick shot hides every kept GUI and puts every one of them back', function()
+    reset(); a:KeepGui('nameplates'); quickChord()
+    assert(guis.ingame == true); assert(guis.nameplates == true)
+    advance(1); advance(4.1)
+    assert(guis.ingame == false); assert(guis.nameplates == false)
+end)
+test('a GUI name the client does not know does not cost the hiding', function()
+    reset(); unknownGuis.nonsense = true; a:KeepGui('nonsense'); quickChord()
+    assert(guiHidden); advance(1); advance(4.1); assert(not guiHidden)
+end)
+test('if the ingame GUI itself is refused, nothing is left hidden', function()
+    reset(); a:KeepGui('nameplates'); unknownGuis.ingame = true
+    local ok = a:HideGui(); assert(not ok)
+    assert(guis.nameplates ~= true, 'an extra GUI was left hidden after the base one failed')
+    unknownGuis.ingame = nil
+end)
+test('the probe only reads', function()
+    reset(); unknownGuis.nonsense = true; a:ProbeGuis()
+    for name, hidden in pairs(guis) do assert(hidden ~= true, name .. ' was hidden by a probe') end
+end)
+test('a GUI tried by hand comes back on its own', function()
+    reset(); a:TrialGui('nameplates'); assert(guis.nameplates == true)
+    advance(5); assert(guis.nameplates == true, 'the trial ended early')
+    advance(5.1); assert(guis.nameplates == false); assert(not a.trialGui)
+    a:TrialGui('nameplates'); a:Stop(); assert(guis.nameplates == false)
+end)
+test('keep and drop are a setting, and ingame is not one of them', function()
+    reset(); assert(a:KeepGui('nameplates')); assert(not a:KeepGui('nameplates'))
+    assert(not a:KeepGui('ingame'))
+    assert(#a:GuisToHide() == 2); assert(a:DropGui('nameplates')); assert(not a:DropGui('nameplates'))
+    assert(#a:GuisToHide() == 1)
+end)
+test('reset gives back a fresh list, not the one the defaults hold', function()
+    reset(); a:KeepGui('nameplates'); a:Command('reset')
+    assert(#a.sv.extraGuis == 0); assert(#a.DEFAULTS.extraGuis == 0, 'the defaults were written through')
+    a:KeepGui('nameplates'); assert(#a.DEFAULTS.extraGuis == 0)
 end)
 print(string.format('%d tests passed', count))

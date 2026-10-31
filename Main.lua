@@ -16,6 +16,15 @@
 -- listened to, because if a capture ever does get reported the interface may as well come
 -- back early.
 --
+-- What quick shot cannot do is take the nameplates and health bars with it. Those are not in
+-- the "ingame" GUI -- the client's own screenshot mode hides that GUI AND switches the plates
+-- off separately, through SetSetting, which is private to an add-on exactly like
+-- TakeScreenshot turned out to be. There is no public call for them: the API dump's only
+-- nameplate functions set a font. So the add-on hides every GUI it is allowed to hide, and
+-- /pbshot guis asks the client which other GUIs exist, in case one of them is where the
+-- plates live. A name that works can be added to the hiding with /pbshot gui keep <name>,
+-- which is a setting rather than a new release.
+--
 -- Left is the D-pad only. The bind inherited from UI_SHORTCUT_INPUT_LEFT also arrives when
 -- the left analog stick is pushed left, because the stick emulates the same directional
 -- input, and there is no key code in the handler to tell the two apart. What can be read is
@@ -54,6 +63,18 @@ local DEFERRED_FIRE = addon.name .. "DeferredFire"
 
 local MODES = { "auto", "scene", "gui" }
 
+local BASE_GUI = "ingame"
+-- Candidates for /pbshot guis. The four the client's own Lua ever names are first; the rest
+-- are guesses at where nameplates and health bars might live, and asking costs nothing
+-- because GetGuiHidden only reads.
+local GUI_CANDIDATES = {
+	"ingame", "app", "pregame", "internal_ingame",
+	"nameplates", "nameplate", "unitframes", "hud", "world", "overlay", "3d", "console",
+}
+-- A GUI hidden by hand is put back on its own, so a wrong name cannot cost a relog.
+local GUI_TRIAL_S = 10
+local GUI_TRIAL_UPDATE = addon.name .. "GuiTrial"
+
 local QUICK_SHOT_UPDATE = addon.name .. "QuickShot"
 local QUICK_SHOT_TICK_MS = 50
 -- How long the interface stays down. This is a window for a human thumb on the console's
@@ -67,6 +88,9 @@ local DEFAULTS = {
 	announce = true,
 	quickShot = false,
 	quickShotHoldMs = 5000,
+	-- Extra GUI names hidden alongside "ingame". Empty until something is measured: the
+	-- client is the only authority on which names exist, and a wrong one is a no-op at best.
+	extraGuis = {},
 }
 
 -- ---------------------------------------------------------------------------------------
@@ -483,27 +507,142 @@ function addon:EnterClientScreenshotMode()
 end
 
 -- The fallback: no scene, no client code, one public call.
+-- "ingame" plus whatever names have been kept. Nothing is hidden that is not named here, and
+-- every name that is hidden is remembered so the restore cannot miss one.
+function addon:GuisToHide()
+	local names = { BASE_GUI }
+	for _, name in ipairs(self.sv and self.sv.extraGuis or {}) do
+		if name ~= BASE_GUI then
+			names[#names + 1] = name
+		end
+	end
+	return names
+end
+
 function addon:HideGui()
 	if not SetGuiHidden then
 		return false, "no SetGuiHidden"
 	end
-	local ok, err = pcall(SetGuiHidden, "ingame", true)
-	if not ok then
-		return false, tostring(err)
+	local hidden = {}
+	for _, name in ipairs(self:GuisToHide()) do
+		local ok = pcall(SetGuiHidden, name, true)
+		if ok then
+			hidden[#hidden + 1] = name
+		elseif name == BASE_GUI then
+			-- The one name that must work. Anything already hidden goes back first.
+			self.hiddenGuis = hidden
+			self:RestoreGui()
+			return false, "SetGuiHidden refused"
+		end
 	end
+	self.hiddenGuis = hidden
 	self.guiHidden = true
 	self:StartWatchdog()
 	return true
 end
 
 function addon:RestoreGui()
-	if not self.guiHidden then
+	if not self.guiHidden and not (self.hiddenGuis and #self.hiddenGuis > 0) then
 		return
 	end
 	self.guiHidden = false
 	if SetGuiHidden then
-		pcall(SetGuiHidden, "ingame", false)
+		for _, name in ipairs(self.hiddenGuis or {}) do
+			pcall(SetGuiHidden, name, false)
+		end
 	end
+	self.hiddenGuis = nil
+end
+
+-- ---------------------------------------------------------------------------------------
+-- Finding out which GUIs there are
+--
+-- GetGuiHidden is public and only reads, so the client can be asked directly rather than
+-- guessed at. A name it knows answers true or false; a name it does not know answers nil or
+-- throws, and either way that is the answer.
+-- ---------------------------------------------------------------------------------------
+
+function addon:ProbeGuis()
+	if not GetGuiHidden then
+		self:Raw("no GetGuiHidden")
+		return
+	end
+	for _, name in ipairs(GUI_CANDIDATES) do
+		local ok, hidden = pcall(GetGuiHidden, name)
+		local answer
+		if not ok then
+			answer = "refused: " .. tostring(hidden)
+		elseif hidden == nil then
+			answer = "unknown to the client"
+		else
+			answer = "exists, hidden=" .. tostring(hidden)
+		end
+		self:Raw(string.format("gui %-16s %s", name, answer))
+	end
+	self:Raw("kept for quick shot: " .. table.concat(self:GuisToHide(), ", "))
+end
+
+-- Hides one GUI by name, now, for as long as it takes to look at the screen. The trial always
+-- ends by itself: if the name turns out to be the one the chat window is in, there would be
+-- no way left to type the command that undoes it.
+function addon:TrialGui(name)
+	if not SetGuiHidden then
+		self:Raw("no SetGuiHidden")
+		return
+	end
+	if self.trialGui then
+		self:EndGuiTrial()
+		return
+	end
+	local ok, err = pcall(SetGuiHidden, name, true)
+	if not ok then
+		self:Raw(string.format("gui %s refused: %s", name, tostring(err)))
+		return
+	end
+	self.trialGui = name
+	self.trialEndsAtS = GetGameTimeSeconds() + GUI_TRIAL_S
+	em:RegisterForUpdate(GUI_TRIAL_UPDATE, 100, function()
+		if not self.trialEndsAtS or GetGameTimeSeconds() >= self.trialEndsAtS then
+			self:EndGuiTrial()
+		end
+	end)
+	self:Raw(string.format("gui %s hidden for %d seconds", name, GUI_TRIAL_S))
+end
+
+function addon:EndGuiTrial()
+	if not self.trialGui then
+		return
+	end
+	local name = self.trialGui
+	self.trialGui = nil
+	self.trialEndsAtS = nil
+	em:UnregisterForUpdate(GUI_TRIAL_UPDATE)
+	if SetGuiHidden then
+		pcall(SetGuiHidden, name, false)
+	end
+end
+
+function addon:KeepGui(name)
+	if name == BASE_GUI or not self.sv then
+		return false
+	end
+	for _, kept in ipairs(self.sv.extraGuis) do
+		if kept == name then
+			return false
+		end
+	end
+	table.insert(self.sv.extraGuis, name)
+	return true
+end
+
+function addon:DropGui(name)
+	for index, kept in ipairs(self.sv and self.sv.extraGuis or {}) do
+		if kept == name then
+			table.remove(self.sv.extraGuis, index)
+			return true
+		end
+	end
+	return false
 end
 
 -- ---------------------------------------------------------------------------------------
@@ -653,6 +792,7 @@ end
 function addon:Stop()
 	self:CancelPress()
 	self:EndQuickShot()
+	self:EndGuiTrial()
 	self:SetInputLayer(false)
 	self:RestoreGui()
 	self:StopWatchdog()
@@ -740,6 +880,8 @@ function addon:PrintStatus()
 	self:Raw(string.format("quick shot=%s hold=%dms state=%s shots=%d last shot=%s",
 		tostring(self:QuickShot()), self:QuickShotHoldMs(), tostring(self.quickShotState or "idle"),
 		self.quickShots or 0, tostring(self.lastShot or "none")))
+	self:Raw(string.format("guis hidden by quick shot: %s | trial=%s",
+		table.concat(self:GuisToHide(), ", "), tostring(self.trialGui or "none")))
 	self:Raw(string.format("state: hudScene=%s guiHidden=%s error=%s last=%s",
 		tostring(SCENE_MANAGER and SCENE_MANAGER:GetHUDSceneName()), tostring(self.guiHidden == true),
 		tostring(self.error or "none"), tostring(self.lastError or "none")))
@@ -817,6 +959,33 @@ function addon:Command(argumentString)
 		return
 	end
 
+	if command == "guis" then
+		self:ProbeGuis()
+		return
+	end
+
+	-- /pbshot gui <name>            hide it for ten seconds and put it back
+	-- /pbshot gui keep|drop <name>  add it to, or take it out of, what quick shot hides
+	if command == "gui" then
+		local third = words[3]
+		if argument == "keep" or argument == "drop" then
+			if not third then
+				self:Raw("which gui?")
+				return
+			end
+			local changed = argument == "keep" and self:KeepGui(third) or self:DropGui(third)
+			self:Raw(string.format("%s %s: %s", argument, third, changed and "done" or "no change"))
+			self:Raw("quick shot hides: " .. table.concat(self:GuisToHide(), ", "))
+			return
+		end
+		if not argument then
+			self:Raw("which gui? /pbshot guis lists the names worth trying")
+			return
+		end
+		self:TrialGui(argument)
+		return
+	end
+
 	if command == "binds" then
 		self:PrintBinds()
 		return
@@ -824,7 +993,9 @@ function addon:Command(argumentString)
 
 	if command == "reset" then
 		for key, value in pairs(DEFAULTS) do
-			self.sv[key] = value
+			-- A table default must be copied: assigning it would hand the add-on's one
+			-- DEFAULTS table to the saved variables and make every later edit permanent.
+			self.sv[key] = type(value) == "table" and {} or value
 		end
 		self.announcedFallback = false
 		self:Restart()
@@ -841,6 +1012,7 @@ function addon:Command(argumentString)
 		self:Raw(Text(SI_PBSSMS_HELP_QUICK))
 		self:Raw(Text(SI_PBSSMS_HELP_HOLD))
 		self:Raw(Text(SI_PBSSMS_HELP_BINDS))
+		self:Raw(Text(SI_PBSSMS_HELP_GUIS))
 		self:Raw(Text(SI_PBSSMS_HELP_MASTER))
 		self:Raw(Text(SI_PBSSMS_HELP_RESET))
 		return
@@ -917,5 +1089,7 @@ addon.TRIGGER_LAYER = TRIGGER_LAYER
 addon.SCREENSHOT_SCENE = SCREENSHOT_SCENE
 addon.MAX_HOLD_S = MAX_HOLD_S
 addon.QUICK_SHOT_HOLDS_MS = QUICK_SHOT_HOLDS_MS
+addon.GUI_CANDIDATES = GUI_CANDIDATES
+addon.GUI_TRIAL_S = GUI_TRIAL_S
 
 PBS_SCREENSHOT_MODE_SHORTCUT = addon
