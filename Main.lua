@@ -509,6 +509,17 @@ end
 -- The fallback: no scene, no client code, one public call.
 -- "ingame" plus whatever names have been kept. Nothing is hidden that is not named here, and
 -- every name that is hidden is remembered so the restore cannot miss one.
+-- What the client says about a GUI before it is touched. A GUI that was already hidden --
+-- the loading screen's "app" is one, on a live PS5 -- has to be left hidden afterwards, or
+-- putting the interface back would show something the client had deliberately taken away.
+local function WasHidden(name)
+	if not GetGuiHidden then
+		return nil
+	end
+	local ok, hidden = pcall(GetGuiHidden, name)
+	return ok and hidden or nil
+end
+
 function addon:GuisToHide()
 	local names = { BASE_GUI }
 	for _, name in ipairs(self.sv and self.sv.extraGuis or {}) do
@@ -525,9 +536,10 @@ function addon:HideGui()
 	end
 	local hidden = {}
 	for _, name in ipairs(self:GuisToHide()) do
+		local was = WasHidden(name)
 		local ok = pcall(SetGuiHidden, name, true)
 		if ok then
-			hidden[#hidden + 1] = name
+			hidden[#hidden + 1] = { name = name, was = was }
 		elseif name == BASE_GUI then
 			-- The one name that must work. Anything already hidden goes back first.
 			self.hiddenGuis = hidden
@@ -547,8 +559,8 @@ function addon:RestoreGui()
 	end
 	self.guiHidden = false
 	if SetGuiHidden then
-		for _, name in ipairs(self.hiddenGuis or {}) do
-			pcall(SetGuiHidden, name, false)
+		for _, entry in ipairs(self.hiddenGuis or {}) do
+			pcall(SetGuiHidden, entry.name, entry.was == true)
 		end
 	end
 	self.hiddenGuis = nil
@@ -558,8 +570,10 @@ end
 -- Finding out which GUIs there are
 --
 -- GetGuiHidden is public and only reads, so the client can be asked directly rather than
--- guessed at. A name it knows answers true or false; a name it does not know answers nil or
--- throws, and either way that is the answer.
+-- guessed at. Measured on a PS5, though, it answers false for invented names as readily as
+-- for real ones, so "exists" below means no more than "the client did not object". The only
+-- answer that carries information is a name that comes back already hidden, and the only
+-- proof is to hide one and look -- which is what the trial below is for.
 -- ---------------------------------------------------------------------------------------
 
 function addon:ProbeGuis()
@@ -580,11 +594,16 @@ function addon:ProbeGuis()
 		self:Raw(string.format("gui %-16s %s", name, answer))
 	end
 	self:Raw("kept for quick shot: " .. table.concat(self:GuisToHide(), ", "))
+	self:Raw("a name answering false may still be unknown; /pbshot gui all hides every one at once")
 end
 
--- Hides one GUI by name, now, for as long as it takes to look at the screen. The trial always
--- ends by itself: if the name turns out to be the one the chat window is in, there would be
--- no way left to type the command that undoes it.
+-- Hides a GUI by name -- or every candidate at once, with "all" -- for as long as it takes to
+-- look at the screen. The trial always ends by itself: if a name turns out to be the one the
+-- chat window is in, there would be no way left to type the command that undoes it.
+--
+-- "all" exists because one look at a console settles in a single sitting what a name-by-name
+-- hunt would cost a dozen of: if nameplates survive every GUI the client will hide, no name
+-- hides them, and there is nothing left to try.
 function addon:TrialGui(name)
 	if not SetGuiHidden then
 		self:Raw("no SetGuiHidden")
@@ -594,11 +613,19 @@ function addon:TrialGui(name)
 		self:EndGuiTrial()
 		return
 	end
-	local ok, err = pcall(SetGuiHidden, name, true)
-	if not ok then
-		self:Raw(string.format("gui %s refused: %s", name, tostring(err)))
+	local names = name == "all" and GUI_CANDIDATES or { name }
+	local hidden = {}
+	for _, one in ipairs(names) do
+		local was = WasHidden(one)
+		if pcall(SetGuiHidden, one, true) then
+			hidden[#hidden + 1] = { name = one, was = was }
+		end
+	end
+	if #hidden == 0 then
+		self:Raw(string.format("gui %s refused", name))
 		return
 	end
+	self.trialGuis = hidden
 	self.trialGui = name
 	self.trialEndsAtS = GetGameTimeSeconds() + GUI_TRIAL_S
 	em:RegisterForUpdate(GUI_TRIAL_UPDATE, 100, function()
@@ -613,12 +640,15 @@ function addon:EndGuiTrial()
 	if not self.trialGui then
 		return
 	end
-	local name = self.trialGui
+	local hidden = self.trialGuis or {}
 	self.trialGui = nil
+	self.trialGuis = nil
 	self.trialEndsAtS = nil
 	em:UnregisterForUpdate(GUI_TRIAL_UPDATE)
 	if SetGuiHidden then
-		pcall(SetGuiHidden, name, false)
+		for _, entry in ipairs(hidden) do
+			pcall(SetGuiHidden, entry.name, entry.was == true)
+		end
 	end
 end
 
@@ -979,7 +1009,7 @@ function addon:Command(argumentString)
 			return
 		end
 		if not argument then
-			self:Raw("which gui? /pbshot guis lists the names worth trying")
+			self:Raw("which gui? /pbshot gui all tries every one; /pbshot guis lists them")
 			return
 		end
 		self:TrialGui(argument)

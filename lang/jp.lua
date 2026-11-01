@@ -21,7 +21,7 @@ local strings = {
     SI_PBSSMS_HELP_RESET = "/pbshot reset — 設定を初期化",
     SI_PBSSMS_HELP_QUICK = "/pbshot quick on|off — クイックショットモード",
     SI_PBSSMS_HELP_HOLD = "/pbshot hold 1|3|5|10 — UIを隠す秒数",
-    SI_PBSSMS_HELP_GUIS = "/pbshot guis — クライアントが知っているGUI名を表示（/pbshot gui <名前> で試用）",
+    SI_PBSSMS_HELP_GUIS = "/pbshot guis — GUI名の一覧／ /pbshot gui <名前> または gui all で10秒だけ非表示",
 
     SI_PBSSMS_QUICK_ON = "クイックショットモードを有効にしました。同時押しでUIを数秒間隠し、自動で戻します。その間に本体のキャプチャーボタンで撮影してください。",
     SI_PBSSMS_QUICK_OFF = "クイックショットモードを無効にしました。同時押しでスクリーンショットモードを開きます。",
