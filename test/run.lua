@@ -118,6 +118,7 @@ local function reset()
     a.sv.enabled = true; a.sv.mode = 'auto'; a.error = nil
     gamepad = true; combat = false; now = 0; l2 = 0; blocking = false; stickX = 0
     a.sv.quickShot = false; a.sv.quickShotHoldMs = a.DEFAULTS.quickShotHoldMs
+    a.sv.nameplateToggle = a.DEFAULTS.nameplateToggle
     a.sv.extraGuis = {}; guis = {}; unknownGuis = {}
     weaponDowns = 0; weaponUps = 0; a:Start()
 end
@@ -374,9 +375,10 @@ local function row(labelId)
     error('no row for ' .. tostring(labelId))
 end
 test('the panel carries every switch the slash commands have', function()
-    assert(#panel.rows == 9)
+    assert(#panel.rows == 10)
     assert(row(SI_PBSSMS_ENABLED).type == LibHarvensAddonSettings.ST_CHECKBOX)
     assert(row(SI_PBSSMS_QUICK).type == LibHarvensAddonSettings.ST_CHECKBOX)
+    assert(row(SI_PBSSMS_NAMEPLATE).type == LibHarvensAddonSettings.ST_CHECKBOX)
     assert(row(SI_PBSSMS_MODE).type == LibHarvensAddonSettings.ST_DROPDOWN)
     assert(row(SI_PBSSMS_HOLD).type == LibHarvensAddonSettings.ST_DROPDOWN)
 end)
@@ -439,6 +441,37 @@ test('the panel and the chat lines are the translated ones', function()
     -- last: a panel row built from an untranslated id would show up as the English text.
     assert(GetString(SI_PBSSMS_QUICK) == 'クイックショットモードを使う')
     assert(string.format(GetString(SI_PBSSMS_HOLD_ITEM), 5) == '5秒')
+end)
+-- ---- the client's own nameplate button ----------------------------------------------
+local function nameplateLayerUp() return hud.fragments[a.nameplateFragment] == true end
+test('a quick shot lends the HUD the client screenshot layer, and takes it back', function()
+    reset(); assert(not nameplateLayerUp())
+    quickChord(); assert(nameplateLayerUp(), 'the client layer never went up')
+    advance(1); assert(nameplateLayerUp())
+    advance(4.1); assert(not nameplateLayerUp(), 'the client layer was left on the HUD')
+end)
+test('the add-on never calls the nameplate setting itself', function()
+    local source = io.open('Main.lua'):read('*a')
+    assert(not source:find('SetSetting(', 1, true), 'SetSetting is private; the client presses its own button')
+    assert(not source:find('SCREENSHOT_MODE_GAMEPAD:', 1, true), 'calling the client object would taint its handler')
+    assert(source:find('ZO_ActionLayerFragment:New(NAMEPLATE_LAYER)', 1, true))
+end)
+test('the layer stays off when the toggle is off, and a running one is dropped', function()
+    reset(); a:Command('nameplates off'); quickChord()
+    assert(not nameplateLayerUp()); advance(5.1)
+    reset(); a:Command('nameplates on'); quickChord(); assert(nameplateLayerUp())
+    a:SetNameplateToggle(false); assert(not nameplateLayerUp(), 'turning it off left the layer up')
+    advance(5.1)
+end)
+test('Stop takes the client layer off the HUD', function()
+    reset(); quickChord(); assert(nameplateLayerUp())
+    a:Stop(); assert(not nameplateLayerUp())
+end)
+test('the nameplate checkbox is the same switch as /pbshot nameplates', function()
+    reset(); local entry = row(SI_PBSSMS_NAMEPLATE)
+    entry.setFunction(false); assert(not a:NameplateToggle()); assert(not entry.getFunction())
+    entry.setFunction(true); assert(a:NameplateToggle()); assert(entry.getFunction())
+    a:SetQuickShot(false); assert(entry.disable())
 end)
 -- ---- which GUIs go down --------------------------------------------------------------
 test('quick shot hides every kept GUI and puts every one of them back', function()

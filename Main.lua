@@ -16,14 +16,21 @@
 -- listened to, because if a capture ever does get reported the interface may as well come
 -- back early.
 --
--- What quick shot cannot do is take the nameplates and health bars with it. Those are not in
--- the "ingame" GUI -- the client's own screenshot mode hides that GUI AND switches the plates
--- off separately, through SetSetting, which is private to an add-on exactly like
--- TakeScreenshot turned out to be. There is no public call for them: the API dump's only
--- nameplate functions set a font. So the add-on hides every GUI it is allowed to hide, and
--- /pbshot guis asks the client which other GUIs exist, in case one of them is where the
--- plates live. A name that works can be added to the hiding with /pbshot gui keep <name>,
--- which is a setting rather than a new release.
+-- Nameplates and health bars do not go down with the rest. They are not in the "ingame" GUI
+-- -- the client's own screenshot mode hides that GUI AND switches the plates off separately,
+-- through SetSetting, which is private to an add-on exactly like TakeScreenshot turned out to
+-- be. There is no public call for them: the API dump's only nameplate functions set a font.
+-- Hiding other GUIs does not reach them either; all twelve candidates were tried at once on a
+-- PS5 and the plates stayed up. (GetGuiHidden answers for invented names as readily as for
+-- real ones, so the probe can only ever suggest what to try, never confirm it.)
+--
+-- What does work in the client's screenshot mode is its own button for it, bound to
+-- SCREENSHOT_MODE_TOGGLE_NAMEPLATES in the client's bindings and handled by the client's
+-- code, which may call SetSetting because nothing of an add-on's is on the stack. The add-on
+-- cannot call that handler, but it can raise the layer the action lives in: for the length of
+-- a quick shot the HUD borrows the client's "ScreenshotMode" layer, and the same button that
+-- toggles the plates in screenshot mode toggles them here. The engine delivers the press
+-- straight to the client; see SetNameplateLayer.
 --
 -- Left is the D-pad only. The bind inherited from UI_SHORTCUT_INPUT_LEFT also arrives when
 -- the left analog stick is pushed left, because the stick emulates the same directional
@@ -50,6 +57,11 @@ local SLASH = "/pbshot"
 local SHORT_SLASH = "/pbss"
 
 local TRIGGER_LAYER = "PBsScreenshotModeShortcutTriggerLayer"
+-- The client's own screenshot-mode layer. Its SCREENSHOT_MODE_TOGGLE_NAMEPLATES action
+-- belongs to the client, not to this add-on, which is the whole point: an add-on may not call
+-- SetSetting, but it may put the layer up and let the engine deliver the button to the
+-- client's handler. See the nameplate note at the top of this file.
+local NAMEPLATE_LAYER = "ScreenshotMode"
 local SCREENSHOT_SCENE = "gamepadScreenshotMode"
 local HUD_SCENE = "hud"
 
@@ -88,6 +100,7 @@ local DEFAULTS = {
 	announce = true,
 	quickShot = false,
 	quickShotHoldMs = 5000,
+	nameplateToggle = true,
 	-- Extra GUI names hidden alongside "ingame". Empty until something is measured: the
 	-- client is the only authority on which names exist, and a wrong one is a no-op at best.
 	extraGuis = {},
@@ -177,6 +190,20 @@ function addon:SetQuickShot(value)
 	self:RefreshPanel()
 end
 
+function addon:NameplateToggle()
+	return self.sv ~= nil and self.sv.nameplateToggle == true
+end
+
+function addon:SetNameplateToggle(value)
+	if self.sv then
+		self.sv.nameplateToggle = value and true or false
+	end
+	if not self:NameplateToggle() then
+		self:SetNameplateLayer(false)
+	end
+	self:RefreshPanel()
+end
+
 function addon:QuickShotHoldMs()
 	local held = self.sv and self.sv.quickShotHoldMs
 	for _, known in ipairs(QUICK_SHOT_HOLDS_MS) do
@@ -237,6 +264,7 @@ function addon:EnsureFragments()
 		return false
 	end
 	self.triggerFragment = ZO_ActionLayerFragment:New(TRIGGER_LAYER)
+	self.nameplateFragment = ZO_ActionLayerFragment:New(NAMEPLATE_LAYER)
 	self.triggerFragment:RegisterCallback("StateChange", function(_, state)
 		if state == SCENE_FRAGMENT_HIDDEN then
 			self:CancelPress()
@@ -268,6 +296,37 @@ function addon:SetInputLayer(wanted)
 			if self.screenshotScene then
 				pcall(function() self.screenshotScene:RemoveFragment(self.triggerFragment) end)
 			end
+		end
+	end
+end
+
+-- Lends the HUD the client's screenshot-mode layer for the length of a quick shot, so that
+-- the button that toggles nameplates in the client's own screenshot mode toggles them here
+-- too. Nothing of this add-on's runs when it is pressed: the engine finds the action in that
+-- layer and calls the client's handler, which is the only code allowed to call SetSetting.
+--
+-- The layer does not fall through, so while it is up the HUD's own buttons are shadowed,
+-- including this add-on's chord. That is why it is only up for the few seconds the interface
+-- is down, and why the hold timer -- not a second press -- is what ends a quick shot.
+function addon:SetNameplateLayer(wanted)
+	wanted = wanted and true or false
+	if self.nameplateLayerAdded == wanted or not self.nameplateFragment or not self.hudScene then
+		return
+	end
+	local ok, err = pcall(function()
+		if wanted then
+			self.hudScene:AddFragment(self.nameplateFragment)
+		else
+			self.hudScene:RemoveFragment(self.nameplateFragment)
+		end
+	end)
+	if ok then
+		self.nameplateLayerAdded = wanted
+	else
+		self.error = "nameplate layer: " .. tostring(err)
+		if wanted then
+			pcall(function() self.hudScene:RemoveFragment(self.nameplateFragment) end)
+			self.nameplateLayerAdded = false
 		end
 	end
 end
@@ -697,6 +756,9 @@ function addon:StartQuickShot()
 		self:Line(SI_PBSSMS_BOTH_FAILED, tostring(err))
 		return false, err
 	end
+	if self:NameplateToggle() then
+		self:SetNameplateLayer(true)
+	end
 	self.quickShotState = "holding"
 	self.quickShotStartedAtS = GetGameTimeSeconds()
 	self.quickShotSaved = nil
@@ -714,6 +776,7 @@ function addon:EndQuickShot()
 	self.quickShotState = nil
 	self.quickShotStartedAtS = nil
 	em:UnregisterForUpdate(QUICK_SHOT_UPDATE)
+	self:SetNameplateLayer(false)
 	self:RestoreGui()
 end
 
@@ -912,6 +975,8 @@ function addon:PrintStatus()
 		self.quickShots or 0, tostring(self.lastShot or "none")))
 	self:Raw(string.format("guis hidden by quick shot: %s | trial=%s",
 		table.concat(self:GuisToHide(), ", "), tostring(self.trialGui or "none")))
+	self:Raw(string.format("nameplate toggle button=%s | client layer up=%s",
+		tostring(self:NameplateToggle()), tostring(self.nameplateLayerAdded == true)))
 	self:Raw(string.format("state: hudScene=%s guiHidden=%s error=%s last=%s",
 		tostring(SCENE_MANAGER and SCENE_MANAGER:GetHUDSceneName()), tostring(self.guiHidden == true),
 		tostring(self.error or "none"), tostring(self.lastError or "none")))
@@ -942,6 +1007,17 @@ function addon:Command(argumentString)
 	if command == "on" or command == "off" then
 		self:SetEnabled(command == "on")
 		self:Line(self:Enabled() and SI_PBSSMS_TURNED_ON or SI_PBSSMS_TURNED_OFF)
+		return
+	end
+
+	if command == "nameplates" then
+		local value = OnOrOff(argument)
+		if value == nil then
+			self:Line(SI_PBSSMS_ERROR_ON_OR_OFF)
+			return
+		end
+		self:SetNameplateToggle(value)
+		self:Raw("nameplate toggle button: " .. (value and "on" or "off"))
 		return
 	end
 
@@ -1041,6 +1117,7 @@ function addon:Command(argumentString)
 		self:Raw(Text(SI_PBSSMS_HELP_MODE))
 		self:Raw(Text(SI_PBSSMS_HELP_QUICK))
 		self:Raw(Text(SI_PBSSMS_HELP_HOLD))
+		self:Raw(Text(SI_PBSSMS_HELP_NAMEPLATES))
 		self:Raw(Text(SI_PBSSMS_HELP_BINDS))
 		self:Raw(Text(SI_PBSSMS_HELP_GUIS))
 		self:Raw(Text(SI_PBSSMS_HELP_MASTER))
