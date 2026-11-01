@@ -30,7 +30,9 @@
 -- cannot call that handler, but it can raise the layer the action lives in: for the length of
 -- a quick shot the HUD borrows the client's "ScreenshotMode" layer, and the same button that
 -- toggles the plates in screenshot mode toggles them here. The engine delivers the press
--- straight to the client; see SetNameplateLayer.
+-- straight to the client; see SetNameplateLayer. Confirmed on a PS5, 2026-11-01: the plates
+-- go down on the HUD and no private-function error is raised, so borrowing a layer really
+-- does leave the client's handler trusted.
 --
 -- Left is the D-pad only. The bind inherited from UI_SHORTCUT_INPUT_LEFT also arrives when
 -- the left analog stick is pushed left, because the stick emulates the same directional
