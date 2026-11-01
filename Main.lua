@@ -489,11 +489,28 @@ function addon:InScreenshotMode()
 		and SCENE_MANAGER:GetHUDSceneName() == SCREENSHOT_SCENE
 end
 
--- Called by the native sheathe binding (D-pad Left hold on standard gamepad
--- controls) inside ScreenshotMode. Only sheathe; never draw an already stowed weapon.
+-- Where the sheathe bind is coming from, or nil when this add-on has no business with it.
+-- Two places now have the client's ScreenshotMode layer up: the client's own screenshot mode,
+-- and the HUD for the length of a quick shot. The layer does not fall through, so an action
+-- this add-on declares in it is the ONLY thing standing between the button and nothing at
+-- all -- returning false does not hand the press back to the game.
+function addon:SheatheContext()
+	if self:QuickShotRunning() and self:OnHud() then
+		return "quick"
+	end
+	if self:InScreenshotMode() and SCENE_MANAGER:IsShowing(SCREENSHOT_SCENE) then
+		return "scene"
+	end
+	return nil
+end
+
+-- Called by the native sheathe binding (D-pad Left hold on standard gamepad controls) while
+-- that layer is up. In screenshot mode it only sheathes: the mode is left by the chord, and a
+-- weapon drawn there would be drawn on the way out. During a quick shot it does what the
+-- button does in the game, both ways, because the player is still standing in the world.
 function addon:OnScreenshotSheathe()
-	if not self:Enabled() or self:InCombat() or not self:InScreenshotMode()
-		or not SCENE_MANAGER:IsShowing(SCREENSHOT_SCENE)
+	local context = self:SheatheContext()
+	if not self:Enabled() or self:InCombat() or not context
 		or (IsInGamepadPreferredMode and not IsInGamepadPreferredMode()) then
 		return false
 	end
@@ -513,7 +530,7 @@ function addon:OnScreenshotSheathe()
 		self.lastInput = "sheathe: cannot read weapon state"
 		return true
 	end
-	if sheathed then
+	if sheathed and context ~= "quick" then
 		self.lastInput = "sheathe: already sheathed"
 		return true
 	end
@@ -525,7 +542,9 @@ function addon:OnScreenshotSheathe()
 		end
 	end
 	local toggleOk, err = pcall(TogglePlayerWield)
-	self.lastInput = toggleOk and "sheathe: requested" or ("sheathe failed: " .. tostring(err))
+	self.lastInput = toggleOk
+		and string.format("%s: requested (%s)", sheathed and "draw" or "sheathe", context)
+		or ("sheathe failed: " .. tostring(err))
 	return true
 end
 

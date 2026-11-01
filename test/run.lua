@@ -442,6 +442,24 @@ test('the panel and the chat lines are the translated ones', function()
     assert(GetString(SI_PBSSMS_QUICK) == 'クイックショットモードを使う')
     assert(string.format(GetString(SI_PBSSMS_HOLD_ITEM), 5) == '5秒')
 end)
+-- ---- weapons during a quick shot ----------------------------------------------------
+test('a quick shot sheathes and draws, both ways', function()
+    reset(); sheathed = false; toggleCalls = 0
+    quickChord(); l2 = 0; blocking = false
+    assert(a:OnScreenshotSheathe()); assert(sheathed and toggleCalls == 1, 'the weapon was not stowed')
+    assert(a:OnScreenshotSheathe()); assert(not sheathed and toggleCalls == 2, 'a stowed weapon was not drawn')
+    advance(5.1)
+    assert(not a:OnScreenshotSheathe(), 'the bind still answered after the quick shot ended')
+    assert(toggleCalls == 2)
+end)
+test('a quick shot off the HUD, or in combat, leaves the weapon alone', function()
+    reset(); sheathed = false; toggleCalls = 0
+    quickChord(); l2 = 0; combat = true
+    assert(not a:OnScreenshotSheathe()); assert(toggleCalls == 0)
+    combat = false; stickX = -1
+    assert(not a:OnScreenshotSheathe(), 'the analog stick stowed a weapon')
+    assert(toggleCalls == 0); stickX = 0; advance(5.1)
+end)
 -- ---- the client's own nameplate button ----------------------------------------------
 local function nameplateLayerUp() return hud.fragments[a.nameplateFragment] == true end
 test('a quick shot lends the HUD the client screenshot layer, and takes it back', function()
